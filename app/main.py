@@ -42,6 +42,12 @@ app = FastAPI(title="minakata", version="0.1.0", lifespan=lifespan)
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
+@app.post("/notify/test")
+async def notify_test():
+    """LINE通知の動作確認用"""
+    await send_daily_forecast()
+    return {"status": "sent"}
+
 
 @app.get("/forecast")
 async def forecast(city: str, days: int = 7):
