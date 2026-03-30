@@ -16,8 +16,7 @@ job "minakata" {
 
       config {
         # ここをECRのイメージURIに書き換えてください
-        # 例: 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/minakata:latest
-        image = "YOUR_ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com/minakata:latest"
+        image = "871950640338.ecr.ap-northeast-1.amazonaws.com/minakata:latest"
         ports = ["http"]
       }
 
