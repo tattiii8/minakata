@@ -1,4 +1,4 @@
-name: Build & Deploy
+name: minakata - Build and Deploy
 
 on:
   push:
@@ -7,11 +7,14 @@ on:
 env:
   AWS_REGION: ap-northeast-1
   ECR_REPOSITORY: minakata
-  NOMAD_JOB_FILE: job.nomad
+  NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -20,36 +23,51 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        id: build
+      - name: Build, tag, and push image to ECR
+        id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
           docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
-          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-      - name: Update Nomad job image
-        env:
-          IMAGE_URI: ${{ steps.build.outputs.image_uri }}
+          docker tag $IMAGE_URI $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      - name: Install Nomad CLI
         run: |
-          sed -i "s|YOUR_ACCOUNT_ID.dkr.ecr.ap-northeast-1.amazonaws.com/minakata:latest|$IMAGE_URI|g" $NOMAD_JOB_FILE
+          NOMAD_VERSION="1.8.4"
+          curl -fsSL https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip \
+            -o nomad.zip
+          unzip nomad.zip
+          sudo mv nomad /usr/local/bin/
+
+      - name: Render Nomad job spec
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image }}
+        run: |
+          sed -i "s|\${DOCKER_IMAGE}|$IMAGE_URI|g" nomad/minakata.nomad.hcl
 
       - name: Deploy to Nomad
         env:
-          NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
           NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
         run: |
-          curl -fsSL https://releases.hashicorp.com/nomad/1.7.7/nomad_1.7.7_linux_amd64.zip -o nomad.zip
-          unzip -q nomad.zip && sudo mv nomad /usr/local/bin/
-          nomad job run $NOMAD_JOB_FILE
+          nomad job run nomad/minakata.nomad.hcl
+
+      - name: Wait for deployment
+        env:
+          NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
+        run: |
+          nomad job status minakata
