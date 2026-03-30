@@ -20,13 +20,13 @@ job "minakata" {
       }
 
       template {
-        data        = <<EOF
-{{ with nomadVar "nomad/jobs/minakata" }}
-LINE_ACCESS_TOKEN={{ .LINE_ACCESS_TOKEN }}
-LINE_USER_ID={{ .LINE_USER_ID }}
-{{ end }}
-NOTIFY_CITY=Kamakura
-EOF
+                        data        = <<EOF
+                {{ with nomadVar "nomad/jobs/minakata" }}
+                LINE_ACCESS_TOKEN={{ .LINE_ACCESS_TOKEN }}
+                LINE_USER_ID={{ .LINE_USER_ID }}
+                {{ end }}
+                NOTIFY_CITY=Kamakura
+                EOF
         destination = "secrets/minakata.env"
         env         = true
       }
