@@ -57,7 +57,10 @@ jobs:
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image }}
         run: |
+          ls -la
+          ls -la nomad/ || echo "nomad dir not found"
           sed -i "s|\${DOCKER_IMAGE}|$IMAGE_URI|g" nomad/minakata.nomad.hcl
+
 
       - name: Deploy to Nomad
         run: |
