@@ -6,7 +6,7 @@ app = FastAPI(title="minakata", version="0.1.0")
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "Ça va bien", "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/")
