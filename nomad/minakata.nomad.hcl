@@ -19,6 +19,12 @@ job "minakata" {
         ports = ["http"]
       }
 
+      env {
+        LINE_ACCESS_TOKEN = "${LINE_ACCESS_TOKEN}"
+        LINE_USER_ID      = "${LINE_USER_ID}"
+        NOTIFY_CITY       = "Kamakura"
+      }
+
       resources {
         cpu    = 256
         memory = 256
