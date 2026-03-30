@@ -7,7 +7,7 @@ job "minakata" {
 
     network {
       port "http" {
-        to = 8000
+        to = 7070
       }
     }
 
