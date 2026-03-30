@@ -6,6 +6,9 @@ app = FastAPI(title="minakata", version="0.1.0")
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
+# タイムアウト設定
+TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+
 
 @app.get("/health")
 def health():
@@ -16,42 +19,48 @@ def health():
 async def forecast(city: str, days: int = 7):
     """都市名を指定して天気予報を取得"""
 
-    # 1. 都市名 → 緯度経度
-    async with httpx.AsyncClient() as client:
-        geo_res = await client.get(GEOCODING_URL, params={
-            "name": city,
-            "count": 1,
-            "language": "ja",
-        })
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+
+        # 1. 都市名 → 緯度経度
+        try:
+            geo_res = await client.get(GEOCODING_URL, params={
+                "name": city,
+                "count": 1,
+                "language": "ja",
+            })
+        except httpx.ConnectTimeout:
+            raise HTTPException(status_code=504, detail="ジオコーディングAPIへの接続がタイムアウトしました")
+
         geo_data = geo_res.json()
 
-    if not geo_data.get("results"):
-        raise HTTPException(status_code=404, detail=f"都市が見つかりません: {city}")
+        if not geo_data.get("results"):
+            raise HTTPException(status_code=404, detail=f"都市が見つかりません: {city}")
 
-    location = geo_data["results"][0]
-    lat = location["latitude"]
-    lon = location["longitude"]
-    city_name = location["name"]
-    country = location["country"]
+        location = geo_data["results"][0]
+        lat = location["latitude"]
+        lon = location["longitude"]
+        city_name = location["name"]
+        country = location["country"]
 
-    # 2. 天気予報取得
-    async with httpx.AsyncClient() as client:
-        weather_res = await client.get(OPEN_METEO_URL, params={
-            "latitude": lat,
-            "longitude": lon,
-            "daily": [
-                "temperature_2m_max",
-                "temperature_2m_min",
-                "precipitation_sum",
-                "windspeed_10m_max",
-                "weathercode",
-            ],
-            "timezone": "Asia/Tokyo",
-            "forecast_days": days,
-        })
-        weather_data = weather_res.json()
+        # 2. 天気予報取得
+        try:
+            weather_res = await client.get(OPEN_METEO_URL, params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": [
+                    "temperature_2m_max",
+                    "temperature_2m_min",
+                    "precipitation_sum",
+                    "windspeed_10m_max",
+                    "weathercode",
+                ],
+                "timezone": "Asia/Tokyo",
+                "forecast_days": days,
+            })
+        except httpx.ConnectTimeout:
+            raise HTTPException(status_code=504, detail="天気予報APIへの接続がタイムアウトしました")
 
-    daily = weather_data["daily"]
+    daily = weather_res.json()["daily"]
 
     forecast_list = []
     for i in range(days):
