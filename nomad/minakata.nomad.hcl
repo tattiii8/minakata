@@ -19,10 +19,16 @@ job "minakata" {
         ports = ["http"]
       }
 
-      env {
-        LINE_ACCESS_TOKEN = "${LINE_ACCESS_TOKEN}"
-        LINE_USER_ID      = "${LINE_USER_ID}"
-        NOTIFY_CITY       = "Kamakura"
+      template {
+        data        = <<EOF
+{{ with nomadVar "nomad/jobs/minakata" }}
+LINE_ACCESS_TOKEN={{ .LINE_ACCESS_TOKEN }}
+LINE_USER_ID={{ .LINE_USER_ID }}
+{{ end }}
+NOTIFY_CITY=Kamakura
+EOF
+        destination = "secrets/minakata.env"
+        env         = true
       }
 
       resources {
