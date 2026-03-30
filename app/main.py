@@ -117,6 +117,42 @@ async def forecast(city: str, days: int = 7):
 
 
 async def send_weather_message(city: str, forecast: list):
+    """LINEに天気をブロードキャスト送信"""
+
+    if not LINE_ACCESS_TOKEN:
+        return
+
+    today = forecast[0]
+    tomorrow = forecast[1]
+
+    text = (
+        f"🌤 {city}の天気予報\n"
+        f"\n"
+        f"【今日 {today['date']}】\n"
+        f"{today['weather']} {today['temp_min']}℃ / {today['temp_max']}℃\n"
+        f"降水量: {today['precipitation_mm']}mm  風速: {today['windspeed_kmh']}km/h\n"
+        f"\n"
+        f"【明日 {tomorrow['date']}】\n"
+        f"{tomorrow['weather']} {tomorrow['temp_min']}℃ / {tomorrow['temp_max']}℃\n"
+        f"降水量: {tomorrow['precipitation_mm']}mm  風速: {tomorrow['windspeed_kmh']}km/h\n"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "messages": [{"type": "text", "text": text}],
+    }
+
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        res = await client.post(
+            "https://api.line.me/v2/bot/message/broadcast",
+            headers=headers,
+            json=body,
+        )
+        res.raise_for_status()
     """LINEに天気を送信"""
 
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
