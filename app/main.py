@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import logging
 import httpx
 import uvicorn
@@ -17,30 +18,58 @@ TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 NOTIFY_CITY = os.getenv("NOTIFY_CITY", "Tokyo")
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+HTTP_TRACE = os.getenv("HTTP_TRACE", "0") == "1"
+
 scheduler = AsyncIOScheduler(timezone="Asia/Tokyo")
 
 
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        payload = {
+            "timestamp": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        if hasattr(record, "extra_data") and record.extra_data is not None:
+            payload["data"] = record.extra_data
+
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+
+        return json.dumps(payload, ensure_ascii=False)
+
+
 def setup_logging():
-    root_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
-
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    )
-
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
+    handler.setFormatter(JsonFormatter())
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(root_level)
     root_logger.handlers.clear()
+    root_logger.setLevel(LOG_LEVEL)
     root_logger.addHandler(handler)
 
-    logging.getLogger("httpx").setLevel(logging.DEBUG)
-    logging.getLogger("httpcore").setLevel(logging.DEBUG)
     logging.getLogger("apscheduler").setLevel(logging.INFO)
-    logging.getLogger("uvicorn").setLevel(logging.DEBUG)
-    logging.getLogger("uvicorn.error").setLevel(logging.DEBUG)
-    logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
+    logging.getLogger("uvicorn").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+    if HTTP_TRACE:
+        logging.getLogger("httpx").setLevel(logging.INFO)
+        logging.getLogger("httpcore").setLevel(logging.DEBUG)
+    else:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def log_event(logger, level, message, data=None, exc_info=False):
+    getattr(logger, level)(
+        message,
+        extra={"extra_data": data},
+        exc_info=exc_info,
+    )
 
 
 setup_logging()
@@ -48,7 +77,12 @@ logger = logging.getLogger("minakata")
 
 
 async def send_daily_forecast():
-    logger.info("scheduled daily forecast started city=%s", NOTIFY_CITY)
+    log_event(
+        logger,
+        "info",
+        "scheduled_daily_forecast_started",
+        {"city": NOTIFY_CITY},
+    )
 
     try:
         result = await forecast(city=NOTIFY_CITY)
@@ -56,15 +90,37 @@ async def send_daily_forecast():
             city=result["city"],
             forecast=result["forecast"],
         )
-        logger.info("scheduled daily forecast completed city=%s", result["city"])
+        log_event(
+            logger,
+            "info",
+            "scheduled_daily_forecast_completed",
+            {"city": result["city"]},
+        )
     except Exception:
-        logger.exception("scheduled daily forecast failed city=%s", NOTIFY_CITY)
+        log_event(
+            logger,
+            "error",
+            "scheduled_daily_forecast_failed",
+            {"city": NOTIFY_CITY},
+            exc_info=True,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("application startup begin")
-    logger.info("scheduler register daily forecast job at 08:00 Asia/Tokyo")
+    log_event(logger, "info", "application_startup_begin")
+    log_event(
+        logger,
+        "info",
+        "scheduler_register_job",
+        {
+            "job": "send_daily_forecast",
+            "trigger": "cron",
+            "hour": 8,
+            "minute": 0,
+            "timezone": "Asia/Tokyo",
+        },
+    )
 
     scheduler.add_job(
         send_daily_forecast,
@@ -76,12 +132,12 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
 
-    logger.info("scheduler started")
+    log_event(logger, "info", "scheduler_started")
     yield
 
-    logger.info("application shutdown begin")
+    log_event(logger, "info", "application_shutdown_begin")
     scheduler.shutdown()
-    logger.info("scheduler stopped")
+    log_event(logger, "info", "scheduler_stopped")
 
 
 app = FastAPI(title="minakata", version="0.1.0", lifespan=lifespan)
@@ -90,24 +146,39 @@ app = FastAPI(title="minakata", version="0.1.0", lifespan=lifespan)
 @app.get("/health")
 def health():
     now = datetime.utcnow().isoformat()
-    logger.debug("health check requested timestamp=%s", now)
+    log_event(
+        logger,
+        "debug",
+        "health_check_requested",
+        {"timestamp": now},
+    )
     return {"status": "ok", "timestamp": now}
 
 
 @app.post("/notify/test")
 async def notify_test():
-    logger.info("notify test endpoint called")
+    log_event(logger, "info", "notify_test_called")
     await send_daily_forecast()
-    logger.info("notify test completed")
+    log_event(logger, "info", "notify_test_completed")
     return {"status": "sent"}
 
 
 @app.get("/forecast")
 async def forecast(city: str, days: int = 7):
-    logger.info("forecast start city=%s days=%s", city, days)
+    log_event(
+        logger,
+        "info",
+        "forecast_started",
+        {"city": city, "days": days},
+    )
 
     if days < 1 or days > 16:
-        logger.warning("invalid forecast days city=%s days=%s", city, days)
+        log_event(
+            logger,
+            "warning",
+            "forecast_invalid_days",
+            {"city": city, "days": days},
+        )
         raise HTTPException(status_code=400, detail="daysは1〜16で指定してください")
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -117,29 +188,56 @@ async def forecast(city: str, days: int = 7):
                 "count": 1,
                 "language": "ja",
             }
-            logger.debug("geocoding request url=%s params=%s", GEOCODING_URL, geo_params)
+            log_event(
+                logger,
+                "debug",
+                "geocoding_request",
+                {"url": GEOCODING_URL, "params": geo_params},
+            )
 
             geo_res = await client.get(GEOCODING_URL, params=geo_params)
 
-            logger.info("geocoding response status=%s city=%s", geo_res.status_code, city)
-            logger.debug("geocoding response body=%s", geo_res.text)
+            log_event(
+                logger,
+                "info",
+                "geocoding_response",
+                {"city": city, "status_code": geo_res.status_code},
+            )
 
             geo_res.raise_for_status()
 
         except httpx.ConnectTimeout:
-            logger.exception("geocoding connect timeout city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "geocoding_connect_timeout",
+                {"city": city},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=504,
                 detail="ジオコーディングAPIへの接続がタイムアウトしました",
             )
         except httpx.HTTPStatusError:
-            logger.exception("geocoding http status error city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "geocoding_http_status_error",
+                {"city": city},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=502,
                 detail="ジオコーディングAPIでエラーが発生しました",
             )
         except httpx.RequestError:
-            logger.exception("geocoding request error city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "geocoding_request_error",
+                {"city": city},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=502,
                 detail="ジオコーディングAPIへのリクエストに失敗しました",
@@ -147,16 +245,32 @@ async def forecast(city: str, days: int = 7):
 
         try:
             geo_data = geo_res.json()
-            logger.debug("geocoding parsed json=%s", geo_data)
+            log_event(
+                logger,
+                "debug",
+                "geocoding_response_json",
+                geo_data,
+            )
         except Exception:
-            logger.exception("failed to parse geocoding response city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "geocoding_json_parse_failed",
+                {"city": city},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=502,
                 detail="ジオコーディングAPIのレスポンス解析に失敗しました",
             )
 
         if not geo_data.get("results"):
-            logger.warning("city not found city=%s", city)
+            log_event(
+                logger,
+                "warning",
+                "city_not_found",
+                {"city": city},
+            )
             raise HTTPException(status_code=404, detail=f"都市が見つかりません: {city}")
 
         location = geo_data["results"][0]
@@ -165,13 +279,17 @@ async def forecast(city: str, days: int = 7):
         city_name = location["name"]
         country = location["country"]
 
-        logger.info(
-            "geocoding success input_city=%s resolved_city=%s country=%s lat=%s lon=%s",
-            city,
-            city_name,
-            country,
-            lat,
-            lon,
+        log_event(
+            logger,
+            "info",
+            "geocoding_success",
+            {
+                "input_city": city,
+                "resolved_city": city_name,
+                "country": country,
+                "latitude": lat,
+                "longitude": lon,
+            },
         )
 
         try:
@@ -188,34 +306,61 @@ async def forecast(city: str, days: int = 7):
                 "timezone": "Asia/Tokyo",
                 "forecast_days": days,
             }
-            logger.debug("weather request url=%s params=%s", OPEN_METEO_URL, weather_params)
+
+            log_event(
+                logger,
+                "debug",
+                "weather_request",
+                {"url": OPEN_METEO_URL, "params": weather_params},
+            )
 
             weather_res = await client.get(OPEN_METEO_URL, params=weather_params)
 
-            logger.info(
-                "weather response status=%s city=%s resolved_city=%s",
-                weather_res.status_code,
-                city,
-                city_name,
+            log_event(
+                logger,
+                "info",
+                "weather_response",
+                {
+                    "input_city": city,
+                    "resolved_city": city_name,
+                    "status_code": weather_res.status_code,
+                },
             )
-            logger.debug("weather response body=%s", weather_res.text)
 
             weather_res.raise_for_status()
 
         except httpx.ConnectTimeout:
-            logger.exception("weather api connect timeout city=%s resolved_city=%s", city, city_name)
+            log_event(
+                logger,
+                "error",
+                "weather_connect_timeout",
+                {"input_city": city, "resolved_city": city_name},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=504,
                 detail="天気予報APIへの接続がタイムアウトしました",
             )
         except httpx.HTTPStatusError:
-            logger.exception("weather api status error city=%s resolved_city=%s", city, city_name)
+            log_event(
+                logger,
+                "error",
+                "weather_http_status_error",
+                {"input_city": city, "resolved_city": city_name},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=502,
                 detail="天気予報APIでエラーが発生しました",
             )
         except httpx.RequestError:
-            logger.exception("weather api request error city=%s resolved_city=%s", city, city_name)
+            log_event(
+                logger,
+                "error",
+                "weather_request_error",
+                {"input_city": city, "resolved_city": city_name},
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=502,
                 detail="天気予報APIへのリクエストに失敗しました",
@@ -223,39 +368,65 @@ async def forecast(city: str, days: int = 7):
 
     try:
         weather_data = weather_res.json()
-        logger.debug("weather parsed json=%s", weather_data)
+        log_event(
+            logger,
+            "debug",
+            "weather_response_json",
+            weather_data,
+        )
         daily = weather_data["daily"]
     except Exception:
-        logger.exception("failed to parse weather response city=%s resolved_city=%s", city, city_name)
+        log_event(
+            logger,
+            "error",
+            "weather_json_parse_failed",
+            {"input_city": city, "resolved_city": city_name},
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=502,
             detail="天気予報APIのレスポンス解析に失敗しました",
         )
 
-    forecast_list = []
     try:
+        forecast_list = []
         for i in range(days):
-            forecast_item = {
+            forecast_list.append({
                 "date": daily["time"][i],
                 "weather": _weather_label(daily["weathercode"][i]),
                 "temp_max": daily["temperature_2m_max"][i],
                 "temp_min": daily["temperature_2m_min"][i],
                 "precipitation_mm": daily["precipitation_sum"][i],
                 "windspeed_kmh": daily["windspeed_10m_max"][i],
-            }
-            forecast_list.append(forecast_item)
+            })
 
-        logger.info(
-            "forecast success city=%s resolved_city=%s days=%s first_date=%s",
-            city,
-            city_name,
-            days,
-            forecast_list[0]["date"] if forecast_list else None,
+        log_event(
+            logger,
+            "info",
+            "forecast_success",
+            {
+                "input_city": city,
+                "resolved_city": city_name,
+                "days": days,
+                "first_date": forecast_list[0]["date"] if forecast_list else None,
+            },
         )
-        logger.debug("forecast result=%s", forecast_list)
+
+        log_event(
+            logger,
+            "debug",
+            "forecast_result_json",
+            forecast_list,
+        )
 
     except Exception:
-        logger.exception("failed building forecast list city=%s resolved_city=%s", city, city_name)
+        log_event(
+            logger,
+            "error",
+            "forecast_build_failed",
+            {"input_city": city, "resolved_city": city_name},
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=502,
             detail="天気予報データの整形に失敗しました",
@@ -271,14 +442,29 @@ async def forecast(city: str, days: int = 7):
 
 
 async def send_weather_message(city: str, forecast: list):
-    logger.info("send_weather_message start city=%s", city)
+    log_event(
+        logger,
+        "info",
+        "send_weather_message_started",
+        {"city": city},
+    )
 
     if not LINE_ACCESS_TOKEN:
-        logger.warning("LINE_ACCESS_TOKEN is not set. skip broadcast city=%s", city)
+        log_event(
+            logger,
+            "warning",
+            "line_access_token_missing_skip_broadcast",
+            {"city": city},
+        )
         return
 
     if len(forecast) < 2:
-        logger.error("forecast data is insufficient for broadcast city=%s forecast=%s", city, forecast)
+        log_event(
+            logger,
+            "error",
+            "forecast_insufficient_for_broadcast",
+            {"city": city, "forecast_length": len(forecast)},
+        )
         return
 
     today = forecast[0]
@@ -305,7 +491,12 @@ async def send_weather_message(city: str, forecast: list):
         "messages": [{"type": "text", "text": text}],
     }
 
-    logger.debug("LINE broadcast request body=%s", body)
+    log_event(
+        logger,
+        "debug",
+        "line_broadcast_request_json",
+        body,
+    )
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
@@ -314,72 +505,166 @@ async def send_weather_message(city: str, forecast: list):
                 headers=headers,
                 json=body,
             )
-            logger.info("LINE broadcast response status=%s city=%s", res.status_code, city)
-            logger.debug("LINE broadcast response body=%s", res.text)
+
+            log_event(
+                logger,
+                "info",
+                "line_broadcast_response",
+                {"city": city, "status_code": res.status_code},
+            )
+
+            response_data = res.json() if res.text else {}
+            log_event(
+                logger,
+                "debug",
+                "line_broadcast_response_json",
+                response_data,
+            )
+
             res.raise_for_status()
-            logger.info("send_weather_message success city=%s", city)
+
+            log_event(
+                logger,
+                "info",
+                "send_weather_message_success",
+                {"city": city},
+            )
 
         except httpx.HTTPStatusError:
-            logger.exception("LINE broadcast status error city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "line_broadcast_http_status_error",
+                {"city": city},
+                exc_info=True,
+            )
             raise
         except httpx.RequestError:
-            logger.exception("LINE broadcast request error city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "line_broadcast_request_error",
+                {"city": city},
+                exc_info=True,
+            )
             raise
         except Exception:
-            logger.exception("LINE broadcast unexpected error city=%s", city)
+            log_event(
+                logger,
+                "error",
+                "line_broadcast_unexpected_error",
+                {"city": city},
+                exc_info=True,
+            )
             raise
 
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    logger.info("webhook received")
+    log_event(logger, "info", "webhook_received")
 
     try:
         body = await request.json()
-        logger.debug("webhook body=%s", body)
+        log_event(
+            logger,
+            "debug",
+            "webhook_request_json",
+            body,
+        )
     except Exception:
-        logger.exception("failed to parse webhook body as json")
+        log_event(
+            logger,
+            "error",
+            "webhook_json_parse_failed",
+            exc_info=True,
+        )
         raise HTTPException(status_code=400, detail="不正なJSONです")
 
     events = body.get("events", [])
-    logger.info("webhook events count=%s", len(events))
+    log_event(
+        logger,
+        "info",
+        "webhook_events_count",
+        {"count": len(events)},
+    )
 
     for idx, event in enumerate(events):
-        logger.debug("webhook event[%s]=%s", idx, event)
+        log_event(
+            logger,
+            "debug",
+            "webhook_event_json",
+            {"index": idx, "event": event},
+        )
 
         if event.get("type") != "message":
-            logger.debug("skip non-message event index=%s type=%s", idx, event.get("type"))
+            log_event(
+                logger,
+                "debug",
+                "webhook_skip_non_message_event",
+                {"index": idx, "type": event.get("type")},
+            )
             continue
 
         message = event.get("message", {})
         if message.get("type") != "text":
-            logger.debug("skip non-text message index=%s message_type=%s", idx, message.get("type"))
+            log_event(
+                logger,
+                "debug",
+                "webhook_skip_non_text_message",
+                {"index": idx, "message_type": message.get("type")},
+            )
             continue
 
         reply_token = event.get("replyToken")
         text = message.get("text", "").strip()
 
-        logger.info(
-            "processing webhook message index=%s reply_token_exists=%s text=%s",
-            idx,
-            bool(reply_token),
-            text,
+        log_event(
+            logger,
+            "info",
+            "webhook_message_processing",
+            {
+                "index": idx,
+                "reply_token_exists": bool(reply_token),
+                "text": text,
+            },
         )
 
         try:
             await handle_message(reply_token, text)
-            logger.info("webhook message processed index=%s text=%s", idx, text)
+            log_event(
+                logger,
+                "info",
+                "webhook_message_processed",
+                {"index": idx, "text": text},
+            )
         except Exception:
-            logger.exception("webhook message processing failed index=%s text=%s", idx, text)
+            log_event(
+                logger,
+                "error",
+                "webhook_message_processing_failed",
+                {"index": idx, "text": text},
+                exc_info=True,
+            )
 
     return {"status": "ok"}
 
 
 async def handle_message(reply_token: str, text: str):
-    logger.info("handle_message start text=%s", text)
+    log_event(
+        logger,
+        "info",
+        "handle_message_started",
+        {"text": text},
+    )
 
     city = text if text else NOTIFY_CITY
-    logger.info("resolved request city=%s", city)
+
+    log_event(
+        logger,
+        "info",
+        "handle_message_resolved_city",
+        {"input_text": text, "city": city},
+    )
 
     try:
         result = await forecast(city=city)
@@ -398,14 +683,23 @@ async def handle_message(reply_token: str, text: str):
             f"降水量: {tomorrow['precipitation_mm']}mm  風速: {tomorrow['windspeed_kmh']}km/h\n"
         )
 
-        logger.info("handle_message forecast success city=%s resolved_city=%s", city, result["city"])
+        log_event(
+            logger,
+            "info",
+            "handle_message_forecast_success",
+            {"input_city": city, "resolved_city": result["city"]},
+        )
 
     except HTTPException as e:
-        logger.warning(
-            "handle_message forecast failed city=%s status_code=%s detail=%s",
-            city,
-            e.status_code,
-            e.detail,
+        log_event(
+            logger,
+            "warning",
+            "handle_message_forecast_failed",
+            {
+                "city": city,
+                "status_code": e.status_code,
+                "detail": e.detail,
+            },
         )
         reply_text = (
             f"「{text}」の天気情報が見つかりませんでした。\n"
@@ -413,18 +707,39 @@ async def handle_message(reply_token: str, text: str):
             f"例: 鎌倉、東京、Osaka"
         )
     except Exception:
-        logger.exception("handle_message unexpected error city=%s", city)
+        log_event(
+            logger,
+            "error",
+            "handle_message_unexpected_error",
+            {"city": city},
+            exc_info=True,
+        )
         reply_text = "エラーが発生しました。しばらくしてからもう一度お試しください。"
 
     await send_reply(reply_token, reply_text)
-    logger.info("handle_message reply sent text=%s", text)
+
+    log_event(
+        logger,
+        "info",
+        "handle_message_reply_sent",
+        {"text": text},
+    )
 
 
 async def send_reply(reply_token: str, text: str):
-    logger.info("send_reply start reply_token_exists=%s", bool(reply_token))
+    log_event(
+        logger,
+        "info",
+        "send_reply_started",
+        {"reply_token_exists": bool(reply_token)},
+    )
 
     if not LINE_ACCESS_TOKEN:
-        logger.warning("LINE_ACCESS_TOKEN is not set. skip reply")
+        log_event(
+            logger,
+            "warning",
+            "line_access_token_missing_skip_reply",
+        )
         return
 
     headers = {
@@ -437,7 +752,12 @@ async def send_reply(reply_token: str, text: str):
         "messages": [{"type": "text", "text": text}],
     }
 
-    logger.debug("LINE reply request body=%s", body)
+    log_event(
+        logger,
+        "debug",
+        "line_reply_request_json",
+        body,
+    )
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
@@ -446,19 +766,53 @@ async def send_reply(reply_token: str, text: str):
                 headers=headers,
                 json=body,
             )
-            logger.info("LINE reply response status=%s", res.status_code)
-            logger.debug("LINE reply response body=%s", res.text)
+
+            log_event(
+                logger,
+                "info",
+                "line_reply_response",
+                {"status_code": res.status_code},
+            )
+
+            response_data = res.json() if res.text else {}
+            log_event(
+                logger,
+                "debug",
+                "line_reply_response_json",
+                response_data,
+            )
+
             res.raise_for_status()
-            logger.info("send_reply success")
+
+            log_event(
+                logger,
+                "info",
+                "send_reply_success",
+            )
 
         except httpx.HTTPStatusError:
-            logger.exception("LINE reply status error")
+            log_event(
+                logger,
+                "error",
+                "line_reply_http_status_error",
+                exc_info=True,
+            )
             raise
         except httpx.RequestError:
-            logger.exception("LINE reply request error")
+            log_event(
+                logger,
+                "error",
+                "line_reply_request_error",
+                exc_info=True,
+            )
             raise
         except Exception:
-            logger.exception("LINE reply unexpected error")
+            log_event(
+                logger,
+                "error",
+                "line_reply_unexpected_error",
+                exc_info=True,
+            )
             raise
 
 
@@ -484,6 +838,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        log_level="debug",
+        log_level="info",
         access_log=True,
     )
