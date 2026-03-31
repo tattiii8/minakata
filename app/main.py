@@ -2,7 +2,7 @@ import os
 import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -140,6 +140,75 @@ async def send_weather_message(city: str, forecast: list):
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         res = await client.post(
             "https://api.line.me/v2/bot/message/broadcast",
+            headers=headers,
+            json=body,
+        )
+        res.raise_for_status()
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    """LINEからのWebhookを受け取る"""
+    body = await request.json()
+
+    for event in body.get("events", []):
+        if event["type"] != "message":
+            continue
+        if event["message"]["type"] != "text":
+            continue
+
+        reply_token = event["replyToken"]
+        text = event["message"]["text"].strip()
+
+        # 天気を返信
+        await handle_message(reply_token, text)
+
+    return {"status": "ok"}
+
+
+async def handle_message(reply_token: str, text: str):
+    """メッセージを解析して天気を返信"""
+
+    # デフォルト都市またはメッセージをそのまま都市名として使う
+    city = text if text else NOTIFY_CITY
+
+    try:
+        result = await forecast(city=city)
+        today = result["forecast"][0]
+        tomorrow = result["forecast"][1]
+
+        reply_text = (
+            f"🌤 {result['city']}の天気予報\n"
+            f"\n"
+            f"【今日 {today['date']}】\n"
+            f"{today['weather']} {today['temp_min']}℃ / {today['temp_max']}℃\n"
+            f"降水量: {today['precipitation_mm']}mm  風速: {today['windspeed_kmh']}km/h\n"
+            f"\n"
+            f"【明日 {tomorrow['date']}】\n"
+            f"{tomorrow['weather']} {tomorrow['temp_min']}℃ / {tomorrow['temp_max']}℃\n"
+            f"降水量: {tomorrow['precipitation_mm']}mm  風速: {tomorrow['windspeed_kmh']}km/h\n"
+        )
+
+    except HTTPException:
+        reply_text = f"「{text}」の天気情報が見つかりませんでした。\n都市名を送ってください。\n例: 鎌倉、東京、Osaka"
+
+    await send_reply(reply_token, reply_text)
+
+
+async def send_reply(reply_token: str, text: str):
+    """LINEにリプライ送信"""
+    headers = {
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "replyToken": reply_token,
+        "messages": [{"type": "text", "text": text}],
+    }
+
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        res = await client.post(
+            "https://api.line.me/v2/bot/message/reply",
             headers=headers,
             json=body,
         )
