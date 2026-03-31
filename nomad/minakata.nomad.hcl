@@ -7,6 +7,7 @@ job "minakata" {
 
     network {
       port "http" {
+        static = 7070
         to = 7070
       }
     }
