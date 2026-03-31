@@ -10,8 +10,8 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+GEOCODING_URL = "hhttps://geocoding-api.open-meteo.com/v1/search"
+OPEN_METEO_URL = "hhttps://api.open-meteo.com/v1/forecast"
 
 TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 
