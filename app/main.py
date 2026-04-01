@@ -832,6 +832,69 @@ def _weather_label(code: int) -> str:
     return "不明"
 
 
+# 1. 定数の追加
+THE_CAT_API_URL = "https://api.thecatapi.com/v1/images/search"
+
+# --- 中略 ---
+
+# 2. エンドポイントの追加
+@app.get("/cat")
+async def get_random_cat():
+    """
+    The Cat APIからランダムな猫画像を取得します。
+    """
+    log_event(logger, "info", "get_random_cat_started")
+
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            log_event(
+                logger,
+                "debug",
+                "the_cat_api_request",
+                {"url": THE_CAT_API_URL}
+            )
+
+            # APIリクエスト
+            response = await client.get(THE_CAT_API_URL)
+
+            log_event(
+                logger,
+                "info",
+                "the_cat_api_response",
+                {"status_code": response.status_code}
+            )
+
+            response.raise_for_status()
+            data = response.json()
+
+            if not data or not isinstance(data, list):
+                raise ValueError("Unexpected API response format")
+
+            # ランダムな1件を取得
+            cat_info = data[0]
+            cat_id = cat_info.get("id")
+            cat_url = cat_info.get("url")
+
+            log_event(
+                logger,
+                "info",
+                "get_random_cat_success",
+                {"cat_id": cat_id, "url": cat_url}
+            )
+
+            return {
+                "id": cat_id,
+                "url": cat_url,
+                "source": "https://thecatapi.com"
+            }
+
+        except httpx.HTTPStatusError:
+            log_event(logger, "error", "the_cat_api_http_error", exc_info=True)
+            raise HTTPException(status_code=502, detail="猫APIとの通信に失敗しました")
+        except Exception:
+            log_event(logger, "error", "the_cat_api_unexpected_error", exc_info=True)
+            raise HTTPException(status_code=500, detail="予期せぬエラーが発生しました")
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
